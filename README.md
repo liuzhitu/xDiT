@@ -16,3 +16,5 @@
 
 ---
 
+
+云端单卡 / TP2 正确性、性能采集与 p95 统计见 [benchmark 说明](docs/wan_tp/benchmark.md)。脚本尚未执行验证。
