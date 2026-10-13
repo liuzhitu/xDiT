@@ -18,6 +18,7 @@ from xfuser.core.distributed import (
     get_sequence_parallel_world_size,
     get_ulysses_parallel_world_size,
     get_ring_parallel_world_size,
+    get_ring_parallel_rank,
     get_ulysses_parallel_rank,
     get_runtime_state,
 )
@@ -28,6 +29,7 @@ from xfuser.logger import init_logger
 from xfuser.core.attention import registry as attention_registry
 from xfuser.core.attention.spec import VarlenPacking
 from xfuser.core.attention.spec import AttnCall
+from xfuser.core.attention.spec import Sparsity
 from xfuser.core.distributed.fp8_comms import (
     fp8_attention_kwargs,
     fp8_comms_input_all_to_all,
@@ -381,6 +383,34 @@ def _trim_trailing_kv_padding(key, value, attention_kwargs, backend=None):
     return key[:, :, :valid_kv_len], value[:, :, :valid_kv_len], consumed
 
 
+def _ring_trim_trailing_kv_padding(attention_function, valid_kv_len, shard_len):
+    """Trim each received block for compute, retaining equal-size ring buffers.
+
+    Ulysses-low SP ranks become contiguous ring blocks after the all-to-all.
+    PyTorch rotates the block from (ring_rank - step) modulo ring_size.
+    """
+    ring_rank = get_ring_parallel_rank()
+    ring_size = get_ring_parallel_world_size()
+    if valid_kv_len <= (ring_size - 1) * shard_len:
+        # Native PyTorch unconditionally merges every callback result. An empty
+        # block cannot safely contribute zero output and negative-infinite LSE.
+        raise NotImplementedError(
+            "Video padding leaves a Ring K/V block with no valid tokens: "
+            f"valid_kv_len={valid_kv_len}, shard_len={shard_len}, ring_degree={ring_size}. "
+            "Use a smaller SP degree or Ulysses only."
+        )
+    step = [0]
+
+    @functools.wraps(attention_function)
+    def call(query, key, value, *args, **kwargs):
+        source = (ring_rank - step[0]) % ring_size
+        step[0] += 1
+        valid = min(shard_len, valid_kv_len - source * shard_len)
+        return attention_function(query, key[:, :, :valid], value[:, :, :valid], *args, **kwargs)
+
+    return call
+
+
 def _get_attention_function(backend=None):
     """
     Get the attention function based on the runtime state or from a given explicit backend.
@@ -633,7 +663,24 @@ def USP(
     # Uniform trailing padding needs no mask or varlen packing. Keeping all Q
     # rows but slicing K/V is equivalent to masking those keys and lets dense
     # backends retain their optimized cross-attention path.
-    key, value, attention_kwargs = _trim_trailing_kv_padding(key, value, attention_kwargs, hb_backend)
+    valid_kv_len = (attention_kwargs or {}).get("valid_kv_len")
+    spec = attention_registry.find(hb_backend)
+    strips_layout_padding = (
+        spec is not None
+        and spec.sparsity in (Sparsity.SPARGE, Sparsity.VSA)
+        and (attention_kwargs or {}).get("thw") is not None
+    )
+    if valid_kv_len is not None and not strips_layout_padding:
+        if get_ring_parallel_world_size() > 1 and not is_causal:
+            if attention_kwargs.get("indices_k") is not None:
+                raise NotImplementedError("Ring trailing video padding does not support packed K/V indices.")
+            attention_function = _ring_trim_trailing_kv_padding(attention_function, valid_kv_len, key.shape[2])
+            # The callback consumes the global prefix. A backend must not
+            # interpret that global length as a length inside its local block.
+            attention_kwargs = dict(attention_kwargs)
+            attention_kwargs["valid_kv_len"] = None
+        else:
+            key, value, attention_kwargs = _trim_trailing_kv_padding(key, value, attention_kwargs, hb_backend)
 
     if kv_head_repeat > 1:
         key, value = _repeat_kv_heads(key, value, kv_head_repeat)

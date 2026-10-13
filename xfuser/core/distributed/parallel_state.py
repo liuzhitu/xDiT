@@ -368,6 +368,34 @@ def init_vae_group(
     _VAE = torch.distributed.new_group(ranks=vae_ranks, backend=backend)
 
 
+def _initialize_sequence_parallel_subgroups(
+    sp_rank_groups: List[List[int]],
+    ulysses_degree: int,
+    ring_degree: int,
+    backend: str,
+):
+    """Split each native SP group using sp_rank = ulysses_rank + U * ring_rank.
+
+    Every WORLD rank creates every subgroup in the same order. Membership comes
+    from RankGenerator, so TP/PP/CFG/DP coordinates stay fixed within an SP group.
+    """
+    rank = get_world_group().rank
+    ulysses_group = ring_group = None
+    for sp_ranks in sp_rank_groups:
+        for ring_rank in range(ring_degree):
+            start = ring_rank * ulysses_degree
+            ranks = sp_ranks[start : start + ulysses_degree]
+            group = torch.distributed.new_group(ranks=ranks, backend=backend)
+            if rank in ranks:
+                ulysses_group = group
+        for ulysses_rank in range(ulysses_degree):
+            ranks = sp_ranks[ulysses_rank::ulysses_degree]
+            group = torch.distributed.new_group(ranks=ranks, backend=backend)
+            if rank in ranks:
+                ring_group = group
+    return ulysses_group, ring_group
+
+
 def initialize_model_parallel(
     data_parallel_degree: int = 1,
     classifier_free_guidance_degree: int = 1,
@@ -512,23 +540,23 @@ def initialize_model_parallel(
 
     # if HAS_LONG_CTX_ATTN and sequence_parallel_degree > 1:
     if HAS_LONG_CTX_ATTN:
-        from yunchang import set_seq_parallel_pg
         from yunchang.globals import PROCESS_GROUP
 
-        set_seq_parallel_pg(
-            sp_ulysses_degree=ulysses_degree,
-            sp_ring_degree=ring_degree,
-            rank=get_world_group().rank_in_group,
-            world_size=dit_parallel_size,
+        sp_rank_groups = rank_generator.get_ranks("sp")
+        ulysses_group, ring_group = _initialize_sequence_parallel_subgroups(
+            sp_rank_groups, ulysses_degree, ring_degree, backend
         )
+        # Native USP and legacy YunChang attention consume these same handles.
+        PROCESS_GROUP.ULYSSES_PG = ulysses_group
+        PROCESS_GROUP.RING_PG = ring_group
 
         _SP = init_model_parallel_group(
-            group_ranks=rank_generator.get_ranks("sp"),
+            group_ranks=sp_rank_groups,
             local_rank=get_world_group().local_rank,
             backend=backend,
             parallel_mode="sequence",
-            ulysses_group=PROCESS_GROUP.ULYSSES_PG,
-            ring_group=PROCESS_GROUP.RING_PG,
+            ulysses_group=ulysses_group,
+            ring_group=ring_group,
         )
     else:
         _SP = init_model_parallel_group(
@@ -591,6 +619,13 @@ def destroy_model_parallel():
 
     global _SP
     if _SP:
+        if HAS_LONG_CTX_ATTN:
+            from yunchang.globals import PROCESS_GROUP
+
+            torch.distributed.destroy_process_group(_SP.ulysses_group)
+            torch.distributed.destroy_process_group(_SP.ring_group)
+            PROCESS_GROUP.ULYSSES_PG = None
+            PROCESS_GROUP.RING_PG = None
         _SP.destroy()
     _SP = None
 

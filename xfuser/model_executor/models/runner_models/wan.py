@@ -599,6 +599,13 @@ class xFuserWan22DistilledI2VModel(xFuserWan22I2VModel):
 class xFuserWan21T2VModel(xFuserWanModel):
     min_diffusers_version = "0.35.2"
 
+    def _validate_config(self, config: xFuserArgs) -> None:
+        super()._validate_config(config)
+        if config.tensor_parallel_degree <= 1:
+            return
+        if not config.gemm_quantization_spec.is_pure("none"):
+            raise ValueError("Wan TP currently requires unquantized Transformer GEMMs.")
+
     def _calculate_hybrid_attention_step_multiplier(self, input_args: dict) -> int:
         do_cfg = input_args["guidance_scale"] > 1.0
         if do_cfg and not self.config.use_cfg_parallel:
@@ -651,6 +658,7 @@ class xFuserWan21T2VModel(xFuserWanModel):
         enable_tiling=True,
         enable_slicing=True,
         supports_step_caching=True,
+        tensor_parallel_degree=True,
     )
     settings = ModelSettings(
         mod_value=8,
@@ -698,6 +706,20 @@ class xFuserWan21T2VModel(xFuserWanModel):
     def _post_load_and_state_initialization(self, input_args: dict) -> None:
         super()._post_load_and_state_initialization(input_args)
         self.pipe.scheduler.config.flow_shift = input_args["flow_shift"]
+        if self.config.tensor_parallel_degree > 1:
+            from xfuser.model_executor.models.transformers.wan_tp import (
+                parallelize_wan_attention,
+                xFuserWanTPFeedForward,
+            )
+
+            for block in self.pipe.transformer.blocks:
+                block.ffn = xFuserWanTPFeedForward(block.ffn)
+                parallelize_wan_attention(block.attn1)
+                parallelize_wan_attention(block.attn2)
+            log(
+                f"{self.settings.model_name} FFN + self-attention + text cross-attention "
+                f"TP degree {self.config.tensor_parallel_degree}."
+            )
 
     def _load_model(self) -> DiffusionPipeline:
         from diffusers import WanPipeline
@@ -782,7 +804,9 @@ class xFuserWan22T2VModel(xFuserWan21T2VModel):
     )
 
     # See xFuserWan22I2VModel: "fbcache" == DBCache first-block (Fn_compute_blocks=1).
-    capabilities = replace(xFuserWan21T2VModel.capabilities, use_fp8_comms=True)
+    capabilities = replace(
+        xFuserWan21T2VModel.capabilities, use_fp8_comms=True, tensor_parallel_degree=False
+    )
 
     def _customize_settings(self, config: xFuserArgs) -> None:
         super()._customize_settings(config)

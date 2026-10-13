@@ -232,8 +232,12 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
             pos_embed_seq_len,
         )
         self.attention_kwargs = attention_kwargs
+        # Only self-attention consumes the video K/V length. Keep this key
+        # stable across requests because torch.compile guards on dict keys.
+        self._self_attn_kwargs = attention_kwargs if attention_kwargs is not None else {}
+        self._self_attn_kwargs.setdefault("valid_kv_len", None)
         for block in self.blocks:
-            block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self.attention_kwargs)
+            block.attn1.processor = xFuserWanAttnProcessor(attention_kwargs=self._self_attn_kwargs)
             block.attn2.processor = xFuserWanAttnProcessor(
                 use_ulysses_parallel_attention=False, is_cross_attention=True
             )
@@ -350,6 +354,7 @@ class xFuserWanTransformer3DWrapper(WanTransformer3DModel):
 
         # Part of sequence parallel: given the resolution, we may need to pad the sequence length to match this prior to chunking
         pad_amount = (sp_world_size - (hidden_states.shape[1] % sp_world_size)) % sp_world_size
+        self._self_attn_kwargs["valid_kv_len"] = hidden_states.shape[1] if pad_amount else None
         hidden_states = self._chunk_and_pad_sequence(hidden_states, sp_world_rank, sp_world_size, pad_amount, dim=1)
 
         if ts_seq_len is not None:  # (wan2.2 ti2v)

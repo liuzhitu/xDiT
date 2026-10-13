@@ -46,6 +46,7 @@ from xfuser.core.distributed import (
     init_distributed_environment,
 )
 from xfuser.core.attention import registry as attention_registry
+from xfuser.core.distributed.parallel_state import get_tensor_model_parallel_rank
 from xfuser.core.attention.spec import AttentionBackendType, Sparsity
 from xfuser.core.distributed.fp8_comms import setup_fp8_comms, validate_fp8_comms_config
 from xfuser.core.distributed.attention_schedule import (
@@ -1390,8 +1391,8 @@ class xFuserModel(abc.ABC):
         """
         Gathers DiffusionOutput objects from all DP groups onto the last rank.
 
-        Within each SP group every rank holds an identical copy of the output
-        Only the first rank in the SP group sends the real payload,
+        SP, TP and CFG ranks cooperate on the same output. Only their group-local
+        rank-zero representative sends the real payload,
         the other ranks send None to keep the collective valid.
 
         """
@@ -1401,7 +1402,11 @@ class xFuserModel(abc.ABC):
         world_group = get_world_group()
         last_rank = world_group.world_size - 1
 
-        is_representative = get_sequence_parallel_rank() == 0 and get_classifier_free_guidance_rank() == 0
+        is_representative = (
+            get_sequence_parallel_rank() == 0
+            and get_tensor_model_parallel_rank() == 0
+            and get_classifier_free_guidance_rank() == 0
+        )
         send_obj = output if is_representative else None
 
         gather_list = [None] * world_group.world_size if world_group.rank == last_rank else None
