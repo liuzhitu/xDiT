@@ -2,6 +2,7 @@
 
 本 fork 的 `codex/wan21-tp` 分支在 xDiT 原生模型适配体系中实现了 **Wan2.1 T2V 1.3B / 14B 的 Tensor Parallel（TP）源码接入**，共用按实际模型维度和层数切分的实现。
 
+**当前状态：源码实现与人工审阅已完成；云端正确性和性能验证尚未执行。计划先验证 1.3B，尚无加速或显存收益结论。**
 
 - **FFN TP**：Column / Row Linear 分片，保留原生 GELU 和 Dropout；Row bias 由 TP 组内 rank 0 在 `F.linear` 中贡献一次，再进行 AllReduce。
 - **SelfAttention TP**：Q/K/V 与输出投影分片，Q/K RMSNorm 跨 TP 汇总全维统计，继续使用原生 RoPE 与 USP。
