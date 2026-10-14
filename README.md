@@ -1,519 +1,151 @@
-<div align="center">
-  <!-- <h1>KTransformers</h1> -->
-  <p align="center">
+# xDiT_WAN2.1_TP
 
-  <picture>
-    <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/XDiTlogo.png" width="50%">
+基于 [xDiT](https://github.com/xdit-project/xDiT) 的 **Wan2.1 T2V Tensor Parallel（TP，张量并行）推理实现**。本项目在 xDiT 原生模型适配体系中，为 Wan2.1 T2V 1.3B / 14B 接入 FFN、SelfAttention 和文本 CrossAttention 的参数与计算分片，并适配 TP 与 Ring、Ulysses、混合 USP 及 DP 的组合。
 
-  </p>
-  <h3>A Scalable Inference Engine for Diffusion Transformers (DiTs) on Multiple Computing Devices</h3>
-  <a href="#cite-us">📝 Papers</a> | <a href="#QuickStart">🚀 Quick Start</a> | <a href="#support-dits">🎯 Supported DiTs</a> | <a href="#dev-guide">📚 Dev Guide </a> | <a href="https://github.com/xdit-project/xDiT/discussions">📈  Discussion </a> | <a href="https://medium.com/@xditproject">📝 Blogs</a></strong>
-  <p></p>
+**当前状态：TP 源码接入与人工审阅已完成；云端正确性、模型推理与性能验证尚未执行。计划先验证 1.3B，14B 共用实现但未运行验证。当前没有加速比或显存收益结论。**
 
-[![](https://dcbadge.limes.pink/api/server/https://discord.gg/YEWzWfCF9S)](https://discord.gg/YEWzWfCF9S)
+## 代码与文档入口
 
-</div>
+完整 TP 实现保存在 [`codex/wan21-tp`](https://github.com/liuzhitu/xDiT_WAN2.1_TP/tree/codex/wan21-tp) 分支。默认分支 `main` 的 README 介绍本项目，其源码仍沿用该分支的上游历史；运行 TP 时请检出实现分支并记录实际 commit。
 
-<h2 id="agenda">Table of Contents</h2>
+- [详细设计、接口契约与待验证项目](https://github.com/liuzhitu/xDiT_WAN2.1_TP/blob/codex/wan21-tp/docs/wan_tp/README.md)
+- [单卡 / TP2 正确性与性能采集协议](https://github.com/liuzhitu/xDiT_WAN2.1_TP/blob/codex/wan21-tp/docs/wan_tp/benchmark.md)：脚本已编写，命令待云端执行。
 
-- [🔥 Meet xDiT](#meet-xdit)
-- [📢 Open-source Community](#updates)
-- [🎯 Supported DiTs](#support-dits)
-- [📈 Performance](#support-dits)
-- [🚀 QuickStart](#QuickStart)
-- [🖼️ ComfyUI with xDiT](#comfyui)
-- [✨ xDiT's Arsenal](#secrets)
-  - [Parallel Methods](#parallel)
-    - [1. PipeFusion](#PipeFusion)
-    - [2. Unified Sequence Parallel](#USP)
-    - [3. Hybrid Parallel](#hybrid_parallel)
-    - [4. CFG Parallel](#cfg_parallel)
-    - [5. Parallel VAE](#parallel_vae)
-  - [Single GPU Acceleration](#1gpuacc)
-    - [Compilation Acceleration](#compilation)
-    - [Cache Acceleration](#cache_acceleration)
-- [📚  Develop Guide](#dev-guide)
-- [🚧  History and Looking for Contributions](#history)
-- [📝 Cite Us](#cite-us)
+实现基线为上游 commit `97a4425c68071e1fdf04d40f468015d30be60f41`，不代表 xDiT 最新版本的能力。实现分支已保存完整源码，无需再应用旧项目的累计补丁。
 
+## 我们实现了什么
 
-<h2 id="meet-xdit">🔥 Meet xDiT</h2>
-
-Diffusion Transformers (DiTs) are driving advancements in high-quality image and video generation.
-With the escalating input context length in DiTs, the computational demand of the Attention mechanism grows **quadratically**!
-Consequently, multi-GPU and multi-machine deployments are essential to meet the **real-time** requirements in online services.
-
-
-<h3 id="meet-xdit-parallel">Parallel Inference</h3>
-
-To meet real-time demand for DiTs applications, parallel inference is a must.
-xDiT is an inference engine designed for the parallel deployment of DiTs on a large scale.
-xDiT provides a suite of efficient parallel approaches for Diffusion Models, as well as computation accelerations.
-
-The overview of xDiT is shown as follows.
-
-<picture>
-  <img alt="xDiT" src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/xdit_overview.png">
-</picture>
-
-
-1. Sequence Parallelism, [USP](https://arxiv.org/abs/2405.07719) is a unified sequence parallel approach proposed by us combining DeepSpeed-Ulysses, Ring-Attention.
-
-2. [PipeFusion](https://arxiv.org/abs/2405.14430), a sequence-level pipeline parallelism, similar to [TeraPipe](https://arxiv.org/abs/2102.07988) but takes advantage of the input temporal redundancy characteristics of diffusion models.
-
-3. Data Parallel: Processes multiple prompts or generates multiple images from a single prompt in parallel across images.
-
-4. CFG Parallel, also known as Split Batch: Activates when using classifier-free guidance (CFG) with a constant parallelism of 2.
-
-The four parallel methods in xDiT can be configured in a hybrid manner, optimizing communication patterns to best suit the underlying network hardware.
-
-As shown in the following picture, xDiT offers a set of APIs to adapt DiT models in [huggingface/diffusers](https://github.com/huggingface/diffusers) to hybrid parallel implementation through simple wrappers.
-If the model you require is not available in the model zoo, developing it by yourself is not so difficult; please refer to our [Dev Guide](#dev-guide).
-
-We also have implemented the following parallel strategies for reference:
-
-1. Tensor Parallelism
-2. [DistriFusion](https://arxiv.org/abs/2402.19481)
-
-<h3 id="meet-xdit-cache">Cache Acceleration</h3>
-
-Cache method, including [TeaCache](https://github.com/ali-vilab/TeaCache.git), [First-Block-Cache](https://github.com/chengzeyi/ParaAttention.git) and [DiTFastAttn](https://github.com/thu-nics/DiTFastAttn), which exploits computational redundancies between different steps of the Diffusion Model to accelerate inference on a single GPU.
-
-<h3 id="meet-xdit-perf">Computing Acceleration</h3>
-
-Optimization is orthogonal to parallel and focuses on accelerating performance on a single GPU.
-
-First, xDiT employs a series of kernel acceleration methods. In addition to utilizing well-known Attention optimization libraries, we leverage compilation acceleration technologies such as `torch.compile` and `onediff`.
-
-
-<h2 id="updates">📢 Open-source Community </h2>
-
-The following open-sourced DiT Models are released with xDiT in day 1.
-
-[HunyuanVideo](https://github.com/Tencent/HunyuanVideo) ![GitHub Repo stars](https://img.shields.io/github/stars/Tencent/HunyuanVideo?style=social)
-
-[StepVideo](https://github.com/stepfun-ai/Step-Video-T2V) ![GitHub Repo stars](https://img.shields.io/github/stars/stepfun-ai/Step-Video-T2V?style=social)
-
-[SkyReels-V1](https://github.com/SkyworkAI/SkyReels-V1) ![GitHub Repo stars](https://img.shields.io/github/stars/SkyworkAI/SkyReels-V1?style=social)
-
-[Wan2.1](https://github.com/Wan-Video/Wan2.1) ![GitHub Repo stars](https://img.shields.io/github/stars/Wan-Video/Wan2.1?style=social)
-
-
-
-<h2 id="support-dits">🎯 Supported DiTs</h2>
-
-<div align="center">
-
-| Model Name | CFG | SP | PipeFusion | TP | MR* | Performance Report Link |
-| --- | --- | --- | --- | --- | --- | --- |
-| [🎬 StepVideo](https://huggingface.co/stepfun-ai/stepvideo-t2v) | NA | ✔️ | ❎ | ✔️ | ❎ | [Report](./docs/performance/stepvideo.md) |
-| [🎬 HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | NA | ✔️ | ❎ | ❎ | ✔️ | [Report](./docs/performance/hunyuanvideo.md) |
-| [🎬 HunyuanVideo-1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 ConsisID-Preview](https://github.com/PKU-YuanGroup/ConsisID) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/consisid.md) |
-| [🎬 CogVideoX1.5](https://huggingface.co/THUDM/CogVideoX1.5-5B) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
-| [🎬 Mochi-1](https://github.com/xdit-project/mochi-xdit) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](https://github.com/xdit-project/mochi-xdit) |
-| [🎬 CogVideoX](https://huggingface.co/THUDM/CogVideoX-2b) | ✔️ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/cogvideo.md) |
-| [🎬 Latte](https://huggingface.co/maxin-cn/Latte-1) | ❎ | ✔️ | ❎ | ❎ | ❎ | [Report](./docs/performance/latte.md) |
-| [🎬 Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 Wan2.1-T2V-1.3B](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 Wan2.2-Distilled (LightX2V 4-step)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 SkyReels-V2](https://huggingface.co/Skywork/SkyReels-V2-T2V-14B-540P-Diffusers) (T2V, I2V) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 CausalWan2.2](https://huggingface.co/FastVideo/CausalWan2.2-I2V-A14B-Preview-Diffusers) | ❎ | ❎ | ❎ | ❎ | ✔️ | NA |
-| [🎬 LTX-2](https://huggingface.co/Lightricks/LTX-2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 LTX-Video 0.9.7](https://huggingface.co/Lightricks/LTX-Video-0.9.7-dev) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🔵 HunyuanDiT-v1.2-Diffusers](https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/hunyuandit.md) |
-| [🟡 Lumina-Image-2.0](https://huggingface.co/Alpha-VLLM/Lumina-Image-2.0) | ✔️ | ✔️ | ❎ | ❎ | ❎ | NA |
-| [🔴 Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟠 Flux 2 klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟠 Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟠 Flux](https://huggingface.co/black-forest-labs/FLUX.1-schnell) | NA | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/flux.md) |
-| [🟠 Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | ❎ | ✔️ |  ❎ | ❎ | ✔️ | NA |
-| [🟠 Chroma1-HD](https://huggingface.co/lodestones/Chroma1-HD) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟢 Qwen Image](https://huggingface.co/Qwen/Qwen-Image-2512) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟢 Qwen Image-Edit](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟢 Krea2-Raw](https://huggingface.co/krea/Krea-2-Raw) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟢 Krea2-Turbo](https://huggingface.co/krea/Krea-2-Turbo) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🟢 Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | ✔️ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 Prism (preview-alpha)](https://huggingface.co/FrancisRing/Prism) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 FastH3 Preview v1](https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-VSA-DataFree) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 FastH3 Preview v1 (Dense)](https://huggingface.co/FastVideo/FastVideo-FastH3-4-step-Preview-v1-Dense-DataFree) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🎬 FastH3 V2](https://huggingface.co/FastVideo/FastVideo-FastH3-8-Step-V2) | ❎ | ✔️ | ❎ | ❎ | ✔️ | NA |
-| [🔴 PixArt-Sigma](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
-| [🟢 PixArt-alpha](https://huggingface.co/PixArt-alpha/PixArt-alpha) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/pixart_alpha_legacy.md) |
-| [🟠 Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | ✔️ | ✔️ | ✔️ | ❎ | ✔️ | [Report](./docs/performance/sd3.md) |
-| [🟤 SANA](https://github.com/NVlabs/Sana/blob/main/asset/docs/model_zoo.md) | ✔️ | ✔️ | ✔️ | ❎ | ❎ | [Report](./docs/performance/sana.md) |
-| [⚫ SANA Sprint](https://github.com/NVlabs/Sana/blob/main/asset/docs/model_zoo.md#sana-sprint) | NA | ✔️ | ❎ | ❎ | ❎ | NA |
-| [🟣 SDXL](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0) | ✔️ | ❎ | ❎ | ❎ | ❎ | NA |
-
-MR* = Model is runnable via the model runner. If not, it's runnable via the provided example scripts.
-
-</div>
-
-
-
-
-
-
-<h2 id="comfyui">🖼️ TACO-DiT: ComfyUI with xDiT</h2>
-
-ComfyUI, is the most popular web-based Diffusion Model interface optimized for workflow.
-It provides users with a UI platform for image generation, supporting plugins like LoRA, ControlNet, and IPAdaptor. Yet, its design for native single-GPU usage leaves it struggling with the demands of today's large DiTs, resulting in unacceptably high latency for users like Flux.1.
-
-Using our commercial project **TACO-DiT**, a close-sourced ComfyUI variant built with xDiT, we've successfully implemented a multi-GPU parallel processing workflow within ComfyUI, effectively addressing Flux.1's performance challenges. Below is an example of using TACO-DiT to accelerate a Flux workflow with LoRA:
-
-![ComfyUI xDiT Demo](https://raw.githubusercontent.com/xdit-project/xdit_assets/main/comfyui/flux-demo.gif)
-
-By using TACO-DiT, you could significantly reduce your ComfyUI workflow inference latency, and  boosting the throughput with Multi-GPUs. Now it is compatible with multiple Plug-ins, including ControlNet and LoRAs.
-
-More features and details can be found in our Intro Video:
-+ [[YouTube] TACO-DiT: Accelerating Your ComfyUI Generation Experience](https://www.youtube.com/watch?v=7DXnGrARqys)
-+ [[Bilibili] TACO-DiT: 加速你的ComfyUI生成体验](https://www.bilibili.com/video/BV18tU7YbEra/?vd_source=59c1f990379162c8f596974f34224e4f)
-
-The blog article is also available: [Supercharge Your AIGC Experience: Leverage xDiT for Multiple GPU Parallel in ComfyUI Flux.1 Workflow](https://medium.com/@xditproject/supercharge-your-aigc-experience-leverage-xdit-for-multiple-gpu-parallel-in-comfyui-flux-1-54b34e4bca05).
-
-ComfyUI plugin for xDiT is now available: [xdit-comfyui-private](https://github.com/xdit-project/xdit-comfyui-private)
-
-<h2 id="QuickStart">🚀 QuickStart</h2>
-
-### 1. Install from pip
-
-About `diffusers` version:
-- Different models may require different diffusers versions. Model implementations can vary between diffusers versions, especially for latest models, which affects parallel processing. When encountering model execution errors, you may need to try several recent diffusers versions.
-- While we specify a diffusers version in `pyproject.toml`, newer models may require later versions or even need to be installed from main branch.
-- Limited list of validated diffusers versions can be seen [here](#7-limitations).
-
-`flash_attn` is an optional library that can be installed with xDiT. More supported attention backends can be seen [here](#6-supported-attention-backends).
-
-```
-pip install xfuser  # Basic installation
-pip install "xfuser[flash-attn]"  # With flash attention
-```
-
-### 2. Install from source
-
-```
-pip install -e .
-# Or optionally, with flash attention
-pip install -e ".[flash-attn]"
-```
-
-Note that we use two self-maintained packages:
-
-1. [yunchang](https://github.com/feifeibear/long-context-attention)
-2. [DistVAE](https://github.com/xdit-project/DistVAE)
-
-The [flash_attn](https://github.com/Dao-AILab/flash-attention) used for yunchang should be >= 2.7.0
-
-On Ascend NPU, ring attention needs `yunchang.ring.utils.update_npu_out`, which is not in any PyPI release of yunchang (checked up to 0.6.4). Install a yunchang commit that provides it:
-
-```
-pip install "yunchang @ git+https://github.com/feifeibear/long-context-attention.git@56118e0"
-```
-
-Later yunchang commits renamed that helper with a different signature and are not yet supported on NPU. CUDA and ROCm users can use the PyPI release.
-
-### 3. Docker
-
-We provide a docker image for developers to develop with xDiT. The docker image is [thufeifeibear/xdit-dev](https://hub.docker.com/r/thufeifeibear/xdit-dev). For running with AMD GPUs (MI300X or newer), a monthly image with validated support for select models is available as well: [rocm/pytorch-xdit](https://hub.docker.com/r/rocm/pytorch-xdit)
-
-### 4. Usage
-
-#### Using model runner
-
-The xDiT Model Runner provides a single entry point for running most supported diffusion models with proper benchmarking and profiling support. To use it, simply run:
-
-```bash
-xdit --model FLUX.1-dev \
-    --prompt "A cat running in a garden" \
-    --ulysses_degree 8
-```
-
-The runner does not support all older models. For those we have the example scripts below. More information on how to run the model runner is available [here](docs/runner/runner.md).
-
-#### Using example scripts
-
-We provide examples demonstrating how to run models with xDiT in the [./examples/](./examples/) directory.
-You can easily modify the model type, model directory, and parallel options in the [examples/run.sh](examples/run.sh) within the script to run some already supported DiT models.
-
-```bash
-bash examples/run.sh
-```
-
-Hybridizing multiple parallelism techniques together is essential for efficiently scaling.
-It's important that **the product of all parallel degrees matches the number of devices**.
-Note use_cfg_parallel means cfg_parallel=2. For instance, you can combine CFG, PipeFusion, and sequence parallelism with the command below to generate an image of a cute dog through hybrid parallelism.
-Here ulysses_degree * pipefusion_parallel_degree * cfg_degree(use_cfg_parallel) == number of devices == 8.
-
-
-```bash
-torchrun --nproc_per_node=8 \
-examples/pixartalpha_example.py \
---model models/PixArt-XL-2-1024-MS \
---pipefusion_parallel_degree 2 \
---ulysses_degree 2 \
---num_inference_steps 20 \
---warmup_steps 0 \
---prompt "A cute dog" \
---use_cfg_parallel
-```
-
-⚠️ Applying PipeFusion requires setting `warmup_steps`, also required in DistriFusion, typically set to a small number compared with `num_inference_steps`.
-The warmup step impacts the efficiency of PipeFusion as it cannot be executed in parallel, thus degrading to a serial execution.
-We observed that a warmup of 0 had no effect on the PixArt model.
-Users can tune this value according to their specific tasks.
-
-### 5. Launch an HTTP Service
-
-You can also launch an HTTP service to generate images with xDiT.
-
-[Launching a Text-to-Image Http Service](./docs/developer/Http_Service.md)
-
-### 6. Supported attention backends
-
-When initializing the runtime, xDiT checks which attention backends are installed and available and chooses the fastest one automatically.
-This behaviour can be overriden via command line argument `--attention-backend <backend cli name>`.
-
-Several different attention backends are supported:
-
-| Backend name | CLI name |
+| 模块 | 本项目的实现 |
 | --- | --- |
-| [SDPA](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa |
-| [SDPA - Math](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa_math |
-| [SDPA - Memory Efficient](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa_efficient |
-| [SDPA - Flash](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) | sdpa_flash |
-| [cuDNN](https://docs.nvidia.com/deeplearning/cudnn/frontend/latest/operations/Attention.html) | cudnn |
-| [FAv2](https://github.com/Dao-AILab/flash-attention) | flash |
-| [FAv3](https://github.com/Dao-AILab/flash-attention/tree/main/hopper) | flash_3 |
-| [FAv3 FP8](https://github.com/Dao-AILab/flash-attention/tree/main/hopper) | flash_3_fp8 |
-| [Transformer Engine FP8](https://github.com/NVIDIA/TransformerEngine) | nvte_fp8 |
-| [FAv4](https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute) | flash_4 |
-| [FAv4 FP4](https://github.com/hao-ai-lab/flash-attention-fp4) | flash_4_fp4 |
-| [SAGE](https://github.com/thu-ml/SageAttention) | sage |
-| [AITER](https://github.com/rocm/aiter) | aiter |
-| [AITER MHA v4 (dense)](https://github.com/rocm/aiter) | aiter_bf16, aiter_bf16fp8, aiter_i8fp8, aiter_fp8, aiter_mxfp8, aiter_f8f6, aiter_mxfp6, aiter_f6f4, aiter_mxfp4, aiter_f4f4 |
-| [AITER MHA v4 Sparge](https://github.com/rocm/aiter) | aiter_i8fp8_sparge, aiter_fp8_sparge, aiter_mxfp8_sparge, aiter_f8f6_sparge, aiter_mxfp6_sparge, aiter_f6f4_sparge, aiter_mxfp4_sparge, aiter_f4f4_sparge |
-| [AITER Sage](https://github.com/rocm/aiter) | aiter_sage |
-| [AITER Sage V2](https://github.com/rocm/aiter) | aiter_sage_v2 |
-| [AITER Sparse Sage](https://github.com/rocm/aiter) | aiter_sparse_sage |
-| [AITER Sparse Sage V2](https://github.com/rocm/aiter) | aiter_sparse_sage_v2 |
-| [AITER Sparge](https://github.com/rocm/aiter) | aiter_sparge |
-| [AITER Sparge V2](https://github.com/rocm/aiter) | aiter_sparge_v2 |
-| [Flex Block Sparge](https://github.com/xdit-project/xDiT) | flex_block_sparge |
-| [Sol-Attn](https://github.com/NVlabs/Sana/tree/sol-engine/techniques/sparse_backends) | sol_attn |
-| [AITER MLA](https://github.com/rocm/aiter) | aiter_mla |
-| [AITER FlyDSL](https://github.com/rocm/aiter) | aiter_flydsl |
-| [AITER FlyDSL FP8](https://github.com/rocm/aiter) | aiter_flydsl_fp8 |
+| 原生 runner 接入 | Wan2.1 T2V 1.3B / 14B 共用加载完成后的分片步骤，复用原生 TP 进程组和推理入口 |
+| FFN TP | 第一层 Linear 按输出通道切分，第二层按输入通道切分；保留原生 GELU、Dropout 并归约输出 |
+| SelfAttention TP | Q/K/V 按 heads 对应的通道切分，输出投影采用 Row 分片；复用原生 RoPE 和 USP processor |
+| 文本 CrossAttention TP | 分片 Q/K/V 和输出投影，保留完整文本序列及原生文本条件语义 |
+| Q/K RMSNorm | 跨 TP ranks 汇总平方和，按原始全维计算均方，避免只对本地通道归一化 |
+| TP × SP | 从原生 SP 成员列表建立 Ring / Ulysses 子组，适配混合 USP 与子组销毁 |
+| TP × DP | 保持 DP 副本独立，每个副本只由代表 rank 提交视频，避免 TP 复制输出 |
+| 视频 padding K/V | 传递有效视频长度，在 Ulysses 交换后及 Ring 每步计算时裁掉无效 K/V，通信仍等长 |
 
-xDiT comes with `flash_attn` as an optional install requirement, as it currently supports the largest variety of different GPU architectures.
-However, newer implementations generally offer better performance. If available for you, we highly recommend using `cuDNN`, `FAv3`, `FAv3 FP8` (on _hopper_ GPUs) or `FAv4`, `Transformer engine FP8` (on _blackwell_ GPUs).
-On recent AMD GPUs (MI300X or newer) it is generally recommended to use `AITER` in all cases to get the best possible performance. Note that when using `AITER FP8` as the attention backend with `torch.compile`, it is important to use a version of `AITER` from Jan 16, 2026 or later. Older versions may trigger a bug related to the fake tensors, resulting in a runtime error.
+embedding、普通归一化、调制与最终输出 head 仍在 TP ranks 上复制。本项目分片的是 Transformer 中的 FFN 与 Attention，并非所有模型组件。
 
-Sol-Attn is an optional package and must be installed separately:
+## 如何接入 xDiT
 
-```bash
-pip install "git+https://github.com/NVlabs/Sana.git@sol-engine#subdirectory=techniques/sparse_backends"
+保留 xDiT 原生加载、runtime、进程组、参数放置和推理流程。在模型加载及参数放置完成后，对每个 Transformer block 应用 TP，再继续原生配置和生成流程：
+
+```text
+加载 Pipeline
+  → 初始化 runtime 和进程组
+  → 原生参数放置
+  → Wan2.1 T2V 加载完成步骤：分片 FFN、attn1、attn2
+  → 原生 offload / compile / cache 配置
+  → 原生 runner 推理、scheduler 更新与 VAE 解码
 ```
 
-The dedicated `aiter_bf16`, `aiter_bf16fp8`, `aiter_mxfp8`, `aiter_f8f6`, `aiter_mxfp6`, `aiter_f6f4`, `aiter_mxfp4`, and `aiter_f4f4` ASM backends require gfx950 and head dimension 128. `aiter_bf16` selects the BF16 Q/K/V MHA v4 kernel, `aiter_bf16fp8` selects BF16 Q/K with per-tensor FP8 V, while `aiter` continues to use MHA v3. `aiter_mxfp8` requires an AITER build with either the generic MHA v4 scale-mode API or the legacy `aiter.ops.mha_v4.mha_v4_mxfp8` entrypoint. F4F4/F6F4 pad only the packed FP4 V storage for partial final 128-token tiles; the logical attention sequence length is unchanged.
+调用位置是 `xFuserWan21T2VModel._post_load_and_state_initialization()`。1.3B runner 继承共用 T2V runner 的配置检查和分片步骤；14B 使用共用 runner。维度、heads、层数及参数 dtype 来自实际加载模型，没有为两个参数规模分别写切分实现。`TP=1` 保留原生路径。
 
-Each of those recipes has a Sparge alias (`aiter_fp8_sparge`, `aiter_i8fp8_sparge`, `aiter_mxfp8_sparge`, `aiter_f8f6_sparge`, `aiter_mxfp6_sparge`, `aiter_f6f4_sparge`, `aiter_mxfp4_sparge`, `aiter_f4f4_sparge`) that builds a Sparge block mask at the matching MHA v4 sparse tile and launches the sparse row. gfx950 uses 256×128 for all eight recipes. gfx942 currently supports `aiter_fp8_sparge` and `aiter_i8fp8_sparge` at 256×64. They need head dimension 128 and an AITER `mha_v4` that accepts `block_mask`. Triton Sparge (`aiter_sparge`, `aiter_sparge_v2`) and Flex Sparge (`flex_block_sparge`) are unchanged. Hybrid can switch dense and Sparge per step, for example `--hybrid_attn_high_precision_backend aiter_fp8` with `--hybrid_attn_low_precision_backend aiter_fp8_sparge`.
+选择在加载完成后切分，是为了复用 xDiT 已有生命周期。**加载阶段仍持有完整 Transformer，不能宣称本实现降低了加载峰值。** 权重切片使用独立连续存储，避免分片参数继续引用完整权重的底层存储。
 
-`aiter_flydsl` uses a FlyDSL kernel (MLIR-compiled), validated on gfx1200+ (RDNA4), and runs bf16. It handles self-attention and non-causal cross-attention. Causal cross-attention, GQA, and out-of-range head dims (mismatched between Q and K, or not at least 64 and a multiple of 32) fall back to `sdpa_flash`. Cross-attention needs the kernel from [ROCm/aiter#4188](https://github.com/ROCm/aiter/pull/4188) or later; on earlier `AITER` builds it falls back as well, as does non-causal self-attention padded by more than 0.5% to reach a 128 multiple. `aiter_flydsl_fp8` adds an fp8 self-attention fast path: it quantizes Q/K/V to fp8 for long self-attention (above a head-shape-dependent sequence-length crossover, ~2560-3584 tokens on gfx1201) and stays bf16 below that and for cross-attention. The fp8 pre-pass is unfused, so it raises peak VRAM; pick `aiter_flydsl` on memory-tight configs. fp8 self-attention needs a newer `AITER` build than the bf16 kernel.
+## FFN 的参数与计算分片
 
-Pure FP8 attention can introduce visual artifacts in the output video. To mitigate this, xDiT supports hybrid attention, which runs the first and last N diffusion steps with a high-precision backend and the remaining steps with a low-precision one. Enable it with the following flags:
+设 hidden 维度为 `D`、FFN 中间维度为 `M`、TP degree 为 `P`：
 
-Flag	Description
-`--use_hybrid_attn_schedule`	Enable the hybrid attention scheduler
-`--hybrid_attn_high_precision_backend`	Backend for the first/last N steps (e.g. aiter)
-`--hybrid_attn_low_precision_backend`	Backend for the remaining steps (e.g. aiter_fp8)
-`--num_hybrid_attn_high_precision_steps`	Number of steps N at the start and end that use high precision
+```text
+输入 [..., D]，在 TP 组内复制
+  → Column Linear：[..., M/P]
+  → 原生 GELU / Dropout
+  → Row Linear：每卡得到 [..., D] 部分结果
+  → TP SUM AllReduce
+  → 完整输出 [..., D]
+```
 
-AITER now supports Sage (FP8) and Sage v2 (MXFP4, GFX950 only) for improved quality when doing quantized attention. Sage v2 is still recommended to be combined with hybrid attention, using either AITER Sage or just AITER as the high precision backend.
+PyTorch Linear 权重排列为 `[out_features, in_features]`。Column 按 `dim=0` 切权重并同步切 bias；Row 按 `dim=1` 切权重，完整 bias 在各卡保留，但只有 TP 组内 rank 0 在 `F.linear` 中贡献一次 bias，随后归约。这防止每卡重复贡献 bias，并沿用项目对通信后单独加 bias 的数值顺序处理；分布式结果仍不保证与单卡逐位一致。
 
-There is also experimental support for Sparse Sage attention backends, currently only working for Hunyuan1.5-Sparse (Distilled model). Running Sparse Sage on multi-gpu can be affected by load imbalance, costing performance. To mitigate this, `--use_ssta_sparse_text_to_image` makes the text-to-image attention path sparse (using MOBA top-k sampling) instead of dense, reducing the computational cost of text tokens attending to image blocks. NOTE: This will change the output video, and needs to be further tested to see whether or not this regresses quality or not.
+FFN 中间维度必须整除 TP degree。每次 FFN forward 有一次输出 AllReduce，输入和输出保持完整 hidden 维度，继续使用原生残差与调制计算。
 
+## Attention TP 与全维 Q/K RMSNorm
 
+### SelfAttention
 
-### 7. Limitations
+每个 TP rank 持有连续的一段 heads。Q/K/V 投影按输出通道切分，输出投影按输入通道切分：
 
-#### Diffusers version
+```text
+视频 hidden states
+  → 本地 Q/K/V 投影
+  → Q/K 全维 RMSNorm，各一次统计 AllReduce
+  → 本地 heads + 原生 RoPE
+  → 原生 attention / USP
+  → Row 输出投影 + 一次 TP SUM AllReduce
+```
 
-Below is a list of validated diffusers version requirements. If the model is not in the list, you may need to try several diffusers versions to find a working configuration.
+Q/K 的 RMSNorm 原本作用于完整投影通道。切分后若只统计本地通道，就会改变模型语义。本实现计算本地平方和，再在 TP 组内求和，除以原始 `normalized_shape`，使用原始 eps 归一化；affine weight 随通道切分。FP16/BF16 的统计、归一化和权重乘法在 FP32 完成，最后恢复输入 dtype，参考 PyTorch 2.8 RMSNorm 的运算顺序。
 
-| Model Name | Diffusers version |
+Attention 的 `heads`、`inner_dim` 和 `kv_inner_dim` 更新为本地尺寸，Transformer config 保留全局模型尺寸。SelfAttention 的 `head_perm` 重建为本地 head 索引，避免非零 TP rank 保留全局偏移而越界。原生 RoPE 坐标和 SP 序列切分继续由 Wan wrapper / processor 负责。
+
+### 文本 CrossAttention
+
+视频 Q 和文本 K/V 按通道分片，各卡仍持有完整文本序列，文本长度不会被替换为视频长度。Q 与 K 的 RMSNorm 分别使用视频序列和文本序列的统计形状。计算继续走原生文本 attention 路径，不增加 RoPE，也不对文本 K/V 执行视频 USP 序列交换；输出投影归约后恢复完整 hidden 维度。
+
+每种 Attention 有两次 RMSNorm 统计 AllReduce 和一次输出 AllReduce。因此当前独立 Q/K/V 路径中，一个包含 FFN、SelfAttention 和 CrossAttention 的 block forward 有 **7 次 TP AllReduce**。这是源码通信位置的计数，尚非性能测量结果。
+
+## TP 与 SP / DP 的组合
+
+保持原生 `tp-sp-pp-cfg-dp` rank 排列。TP ranks 切通道，SP ranks 切视频序列；同一 TP 组内 SP 坐标相同。Ring / Ulysses 子组从原生 SP 成员列表建立，并复用 xDiT coordinator 与 YunChang 接口；销毁时释放子组并清空对应引用。
+
+| 组合 | 实现与约束 | 运行验证 |
+| --- | --- | --- |
+| TP | FFN、SelfAttention、文本 CrossAttention 分片 | 待执行 |
+| TP × Ring | 固定 TP heads 分片，Ring 在 SP 子组内交换视频 K/V | 待执行 |
+| TP × Ulysses | SelfAttention heads 必须整除 `TP × Ulysses` | 待执行 |
+| TP × 混合 USP | 按原生 SP 排列组合 Ulysses 与 Ring 子组 | 待执行 |
+| TP × USP × DP | 各 DP 副本独立，增加 TP rank 0 输出条件以避免重复视频 | 待执行 |
+| TP × 共享 DiT ranks 的并行 VAE | 复用原生 VAE 组和解码流程 | 待执行 |
+
+CrossAttention heads 只需整除 TP degree；Ring degree 不加入 head 切分乘数。TP2×Ring2 的组成员人工推导为 TP 组 `[0,1]`、`[2,3]`，SP/Ring 组 `[0,2]`、`[1,3]`。这只是布局说明，尚未运行验证。
+
+输入仍由原生 runner 按 DP 分配 prompts、创建相同 seed 的 generator。TP 组内相同视频片段和文本条件是计算契约；不增加跨所有 ranks 的输入广播。输出继续经过原生 Head、SP gather/unpad，再交给 scheduler / VAE；收集视频时只由 `SP=0、TP=0、CFG=0` 的代表提供真实结果。
+
+## 视频 padding 的处理
+
+SP 需要等长通信张量，但补齐的无效视频 K/V 不应参与 attention softmax。Wan wrapper 在补齐前取得有效视频 token 数，通过 SelfAttention kwargs 传递 `valid_kv_len`：
+
+- 纯 Ulysses：AllToAll 后裁掉 K/V 尾部 padding。
+- Ring / 混合 USP：每步按 K/V 块来源计算有效前缀，只裁剪提交给 attention backend 的 K/V；通信保持等长。
+- Q 与输出保留补齐长度，继续原生交换与最终 gather/unpad。连续请求不需要 padding 时将有效长度状态恢复为 `None`。
+- 完全无效的 Ring K/V 块在通信前明确报错；当前没有修改 PyTorch 的 Ring 合并过程，也没有另写 Ring 实现。
+
+该处理适用于当前 Wan wrapper 的 `TP=1` 和 `TP>1` 路径，目标是密集、非 causal attention。Ring 与 packed K/V indices 同时使用的尾部 padding 明确拒绝。稀疏后端保留自身布局处理，尚无新增正确性验证。
+
+## 支持边界
+
+- 新增 TP 范围为 **Wan2.1 T2V 1.3B / 14B 推理**；I2V、VACE、Wan2.2 和训练未纳入此次新增支持。
+- 已融合 Q/K/V 投影在 TP 接入阶段明确拒绝；当前针对原生独立投影路径。
+- Transformer GEMM 量化布局未适配；TP 与 FSDP 继续遵守原生互斥限制。
+- Wan T2V 的 CFG 并行与 PipeFusion 遵守原生能力声明。普通 CFG guidance 与 CFG 并行是不同概念。
+- 独立 VAE ranks 的加载和调度未适配；offload、compile、cache、稀疏 attention 及上述并行组合仍需分别验证。
+
+## 正确性与性能验证计划
+
+本机只进行源码阅读、编辑和人工 diff 审阅，未运行编译、import、lint、CPU/GPU 测试或模型推理。云端首先验证 1.3B：
+
+1. 分层检查 Column / Row 权重覆盖、bias 仅贡献一次、全维 Q/K RMSNorm、head 排列与 RoPE，并检查归约后 TP ranks 输出一致。
+2. 对齐同版本原生单卡的 DiT 输出与最终 latent；记录 dtype 和明确的误差阈值，不以逐位一致作为默认要求。
+3. 验证 Ring、Ulysses、混合 USP、DP 输出数量、视频 padding、连续请求和子组生命周期。
+4. 正确性后再比较单卡 / TP2 的 DiT、denoising 和完整生成区间，分别记录显存、通信、offload 配置与双卡拓扑。
+
+已有 benchmark 工具包含 `capture`、`compare`、`measure`、`profile` 四种模式，区分正确性复制开销、正式计时和 profiler 开销。固定协议为一次 17 帧预热与两次 81 帧正式生成，832×480、50 steps。脚本尚未执行，两个生成样本不能证明稳定的服务尾延迟。1.3B 的后续结果不能写成 14B 已验证。
+
+## 推荐源码阅读位置
+
+以下链接均指向 TP 实现分支：
+
+| 文件 | 阅读目的 |
 | --- | --- |
-| [HunyuanVideo-1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) | >= 0.36.0 |
-| [Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) | >= 0.36.0 |
-| [Flux 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | >= 0.36.0 |
-| [Ideogram 4](https://huggingface.co/ideogram-ai/ideogram-4-fp8) | >= 0.39.0 |
-| [Flux](https://huggingface.co/black-forest-labs/FLUX.1-dev) | >= 0.35.2 |
-| [Flux Kontext](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev) | >= 0.35.2 |
-| [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) | >= 0.35.2 |
-| [Wan2.1](https://huggingface.co/Wan-AI/Wan2.1-T2V-14B-Diffusers) | >= 0.35.2 |
-| [Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) | >= 0.35.2 |
-| [Wan2.2-Distilled (LightX2V)](https://huggingface.co/lightx2v/Wan2.2-Distill-Models) | >= 0.35.2 |
-| [SkyReels-V2](https://huggingface.co/Skywork/SkyReels-V2-T2V-14B-540P-Diffusers) | >= 0.36.0 |
+| [runner_models/wan.py](https://github.com/liuzhitu/xDiT_WAN2.1_TP/blob/codex/wan21-tp/xfuser/model_executor/models/runner_models/wan.py) | TP 能力声明、1.3B / 14B 共用路径和加载完成后的调用位置 |
+| [transformers/wan_tp.py](https://github.com/liuzhitu/xDiT_WAN2.1_TP/blob/codex/wan21-tp/xfuser/model_executor/models/transformers/wan_tp.py) | 权重切分、Row bias、分布式 RMSNorm 和本地元数据 |
+| [core/distributed/parallel_state.py](https://github.com/liuzhitu/xDiT_WAN2.1_TP/blob/codex/wan21-tp/xfuser/core/distributed/parallel_state.py) | SP 子组成员、创建顺序和销毁流程 |
+| [transformers/transformer_wan.py](https://github.com/liuzhitu/xDiT_WAN2.1_TP/blob/codex/wan21-tp/xfuser/model_executor/models/transformers/transformer_wan.py) | 视频有效长度、序列 / RoPE 切分和 gather/unpad |
+| [layers/usp.py](https://github.com/liuzhitu/xDiT_WAN2.1_TP/blob/codex/wan21-tp/xfuser/model_executor/layers/usp.py) | Ulysses / Ring 的 padding 裁剪与空块拒绝边界 |
 
-<h2 id="dev-guide">📚  Develop Guide</h2>
+## 上游与参考
 
-We provide a step-by-step guide for adding new models, please refer to the following tutorial.
-
-[Apply xDiT to new models](./docs/developer/adding_models/readme.md)
-
-A high-level design of xDiT framework is provided below, which may help you understand the xDiT framework.
-
-[The implement and design of xdit framework](./docs/developer/The_implement_design_of_xdit_framework.md)
-
-<h2 id="secrets">✨ The xDiT's Arsenal</h2>
-
-The remarkable performance of xDiT is attributed to two key facets.
-Firstly, it leverages parallelization techniques, pioneering innovations such as USP, PipeFusion, and hybrid parallelism, to scale DiTs inference to unprecedented scales.
-
-Secondly, we employ compilation technologies to enhance execution on GPUs, integrating established solutions like `torch.compile` and `onediff` to optimize xDiT's performance.
-
-<h3 id="parallel">1. Parallel Methods</h3>
-
-As illustrated in the accompanying images, xDiTs offer a comprehensive set of parallelization techniques. For the DiT backbone, the foundational methods—Data, USP, PipeFusion, and CFG parallel—operate in a hybrid fashion. Additionally, the distinct methods, Tensor and DistriFusion parallel, function independently.
-For the VAE module, xDiT offers a parallel implementation, [DistVAE](https://github.com/xdit-project/DistVAE), designed to prevent out-of-memory (OOM) issues.
-The (<span style="color: red;">xDiT</span>) highlights the methods first proposed by use.
-
-<div align="center">
-    <img src="https://raw.githubusercontent.com/xdit-project/xdit_assets/main/methods/xdit_method.png" alt="xdit methods">
-</div>
-
-The communication and memory costs associated with the aforementioned intra-image parallelism, except for the CFG and DP (they are inter-image parallel), in DiTs are detailed in the table below. (* denotes that communication can be overlapped with computation.)
-
-As we can see, PipeFusion and Sequence Parallel achieve the lowest communication cost on different scales and hardware configurations, making them suitable foundational components for a hybrid approach.
-
-𝒑: Number of pixels;\
-𝒉𝒔: Model hidden size;\
-𝑳: Number of model layers;\
-𝑷: Total model parameters;\
-𝑵: Number of parallel devices;\
-𝑴: Number of patch splits;\
-𝑸𝑶: Query and Output parameter count;\
-𝑲𝑽: KV Activation parameter count;\
-𝑨 = 𝑸 = 𝑶 = 𝑲 = 𝑽: Equal parameters for Attention, Query, Output, Key, and Value;
-
-
-|                           | attn-KV | communication cost           | param memory   | activations memory             | extra buff memory                  |
-|:-------------------------:|:-------:|:----------------------------:|:--------------:|:------------------------------:|:----------------------------------:|
-| Tensor Parallel           | fresh   | $4O(p \times hs)L$           | $\frac{1}{N}P$ | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$     |
-| DistriFusion*             | stale   | $2O(p \times hs)L$           | $P$            | $\frac{2}{N}A = \frac{1}{N}QO$ | $2AL = (KV)L$                      |
-| Ring Sequence Parallel*   | fresh   | $2O(p \times hs)L$           | $P$            | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$     |
-| Ulysses Sequence Parallel | fresh   | $\frac{4}{N}O(p \times hs)L$ | $P$            | $\frac{2}{N}A = \frac{1}{N}QO$ | $\frac{2}{N}A = \frac{1}{N}KV$     |
-| PipeFusion*               | stale-  | $2O(p \times hs)$            | $\frac{1}{N}P$ | $\frac{2}{M}A = \frac{1}{M}QO$ | $\frac{2L}{N}A = \frac{1}{N}(KV)L$ |
-
-
-<h4 id="PipeFusion">1.1. PipeFusion</h4>
-
-[PipeFusion: Displaced Patch Pipeline Parallelism for Diffusion Models](./docs/methods/pipefusion.md) **(Accepted by NeurIPS 2025)** <a href="https://neurips.cc/virtual/2025/loc/san-diego/poster/119821">Link</a>
-
-<h4 id="USP">1.2. USP: Unified Sequence Parallelism</h4>
-
-[USP: A Unified Sequence Parallelism Approach for Long Context Generative AI](./docs/methods/usp.md)
-
-<h4 id="hybrid_parallel">1.3. Hybrid Parallel</h4>
-
-[Hybrid Parallelism](./docs/methods/hybrid.md)
-
-<h4 id="cfg_parallel">1.4. CFG Parallel</h4>
-
-[CFG Parallel](./docs/methods/cfg_parallel.md)
-
-<h4 id="parallel_vae">1.5. Parallel VAE</h4>
-
-[Patch Parallel VAE](./docs/methods/parallel_vae.md)
-
-<h3 id="1gpuacc">Single GPU Acceleration</h3>
-
-
-<h4 id="compilation">Compilation Acceleration</h4>
-
-We utilize two compilation acceleration techniques, [torch.compile](https://pytorch.org/tutorials/intermediate/torch_compile_tutorial.html) and [onediff](https://github.com/siliconflow/onediff), to enhance runtime speed on GPUs. These compilation accelerations are used in conjunction with parallelization methods.
-
-We employ the nexfort backend of onediff. Please install it before use:
-
-```
-pip install onediff
-pip install -U nexfort
-```
-
-For usage instructions, refer to the [examples/run.sh](./examples/run.sh). Simply append `--use_torch_compile` or `--use_onediff` to your command. Note that these options are mutually exclusive, and their performance varies across different scenarios.
-
-<h4 id="cache_acceleration">Cache Acceleration</h4>
-
-You can use `--use_teacache` or `--use_fbcache` in examples/run.sh, which applies TeaCache and First-Block-Cache respectively.
-Note, cache method is only supported for FLUX model with USP. It is currently not applicable for PipeFusion.
-
-xDiT also provides DiTFastAttn for single GPU acceleration. It can reduce the computation cost of attention layers by leveraging redundancies between different steps of the Diffusion Model.
-
-[DiTFastAttn: Attention Compression for Diffusion Transformer Models](./docs/methods/ditfastattn.md)
-
-<h2 id="history">🚧  History and Looking for Contributions</h2>
-
-We conducted a major upgrade of this project in August 2024, introducing a new set of APIs that are now the preferred choice for all users.
-
-The legacy APIs are applied in early stage of xDiT to explore and compare different parallelization methods.
-They are located in the [legacy](https://github.com/xdit-project/xDiT/tree/legacy) branch, are now considered outdated and do not support hybrid parallelism. Despite this limitation, they offer a broader range of individual parallelization methods, including PipeFusion, Sequence Parallel, DistriFusion, and Tensor Parallel.
-
-For users working with Pixart models, you can still run the examples in the [scripts/](https://github.com/xdit-project/xDiT/tree/legacy/scripts) directory under the `legacy` branch. However, for all other models, we strongly recommend adopting the formal APIs to ensure optimal performance and compatibility.
-
-We also warmly welcome developers to join us in enhancing the project. If you have ideas for new features or models, please share them in our [issues](https://github.com/xdit-project/xDiT/issues). Your contributions are invaluable in driving the project forward and ensuring it meets the needs of the community.
-
-<h2 id="cite-us">📝 Cite Us</h2>
-
-
-[xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism](https://arxiv.org/abs/2411.01738)
-
-```
-@article{fang2024xdit,
-  title={xDiT: an Inference Engine for Diffusion Transformers (DiTs) with Massive Parallelism},
-  author={Fang, Jiarui and Pan, Jinzhe and Sun, Xibo and Li, Aoyu and Wang, Jiannan},
-  journal={arXiv preprint arXiv:2411.01738},
-  year={2024}
-}
-
-```
-
-[PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference](https://openreview.net/forum?id=5xwyxupsLL)
-
-```
-@inproceedings{
-    fang2025pipefusion,
-    title={PipeFusion: Patch-level Pipeline Parallelism for Diffusion Transformers Inference},
-    author={Jiarui Fang and Jinzhe Pan and Aoyu Li and Xibo Sun and WANG Jiannan},
-    booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
-    year={2025},
-    url={https://openreview.net/forum?id=5xwyxupsLL}
-}
-
-```
-
-[USP: A Unified Sequence Parallelism Approach for Long Context Generative AI](https://arxiv.org/abs/2405.07719)
-
-
-```
-@article{fang2024unified,
-  title={A Unified Sequence Parallelism Approach for Long Context Generative AI},
-  author={Fang, Jiarui and Zhao, Shangchun},
-  journal={arXiv preprint arXiv:2405.07719},
-  year={2024}
-}
-
-```
-
-[Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study](https://arxiv.org/abs/2411.13588)
-
-```
-@article{sun2024unveiling,
-  title={Unveiling Redundancy in Diffusion Transformers (DiTs): A Systematic Study},
-  author={Sun, Xibo and Fang, Jiarui and Li, Aoyu and Pan, Jinzhe},
-  journal={arXiv preprint arXiv:2411.13588},
-  year={2024}
-}
-
-```
+本项目沿用 xDiT 基础框架、模型加载和推理设施；上述 Wan TP 接入及组合适配是本 fork 的新增工作。上游通用能力和安装说明见 [xDiT](https://github.com/xdit-project/xDiT)。Wan / Attention 结构阅读参考 Diffusers `v0.35.2`，RMSNorm 数值顺序参考 PyTorch `v2.8.0`；这些是源码参考版本，不是已验证环境声明。视频 padding 处理参考 xDiT [PR #912](https://github.com/xdit-project/xDiT/pull/912) 的有效长度传递与逐块裁剪思路，未整包引入其其他模型或稀疏后端改动。沿用仓库已有许可证，详见 [LICENSE.txt](LICENSE.txt)。
