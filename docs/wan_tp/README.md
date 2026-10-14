@@ -5,7 +5,7 @@
 ## 参考版本与交付方式
 
 - xDiT：`97a4425c68071e1fdf04d40f468015d30be60f41`。
-- 独立源码项目：`D:/研究生/ai_infra/xdit-wan-tp`；GitHub fork：`https://github.com/liuzhitu/xDiT`；实现分支：`codex/wan21-tp`。
+- 独立源码项目：`D:/研究生/ai_infra/xdit-wan-tp`；GitHub fork：`https://github.com/liuzhitu/xDiT_WAN2.1_TP`；实现分支：`codex/wan21-tp`。
 - Diffusers Wan/FFN/Attention 结构阅读参考：`v0.35.2`；PyTorch RMSNorm 数值顺序参考：`v2.8.0`。这些不是已安装环境的版本声明。正式云端运行前仍需确定 Diffusers、YunChang 和模型 checkpoint 的具体版本。
 - 交付方式：本 fork 的 `codex/wan21-tp` 分支直接保存完整源码及修改历史，基于上述固定 commit。旧 `wan_parallel` 仓库中的累计补丁保留为迁移备份，不需要在本分支上重复应用。
 
